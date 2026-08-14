@@ -12,11 +12,12 @@ from config import (
     ensure_data_dirs,
 )
 from trading_calendar import shift_trading_days
+from corporate_actions import is_cancelled, get_split_adjustment
 
 T_PLUS_1_START = pd.Timestamp(T_PLUS_1_START_DATE)
 
 
-def calculate_gap_event(df_price: pd.DataFrame, cutoff: pd.Timestamp, dividend_per_share: float, currency: str) -> dict | None:
+def calculate_gap_event(df_price: pd.DataFrame, ticker: str, cutoff: pd.Timestamp, dividend_per_share: float, currency: str) -> dict | None:
     """
     Чистая функция расчёта одного события гэпа.
     Никакого I/O внутри — только цены (уже загруженные), дата закрытия
@@ -29,10 +30,18 @@ def calculate_gap_event(df_price: pd.DataFrame, cutoff: pd.Timestamp, dividend_p
     в режиме T+2 (до 31.07.2023) или на 1 торговый день в режиме T+1
     (с 31.07.2023). Источник: https://www.moex.com/n62684
 
-    Возвращает None, если данных для расчёта не хватает
-    (например не хватает истории цен, чтобы отсчитать нужное число
-    торговых дней назад от cutoff).
+    Также применяет поправки из corporate_actions.py: корректирует
+    dividend_per_share на коэффициент сплита, если он известен для
+    этого тикера/даты (см. corporate_actions.py про причину).
+
+    Возвращает None, если данных для расчёта не хватает, ИЛИ если это
+    известный отменённый дивиденд (см. CANCELLED_DIVIDENDS).
     """
+    if is_cancelled(ticker, cutoff):
+        return None
+
+    dividend_per_share = dividend_per_share / get_split_adjustment(ticker, cutoff)
+
     settlement_offset = 1 if cutoff >= T_PLUS_1_START else 2
 
     last_buy_day = shift_trading_days(df_price.index, cutoff, settlement_offset)
@@ -60,7 +69,7 @@ def calculate_gap_event(df_price: pd.DataFrame, cutoff: pd.Timestamp, dividend_p
         "next_date": next_date,
         "close_before": close_before,
         "open_after": open_after,
-        "dividend_per_share": dividend_per_share,
+        "dividend_per_share": dividend_per_share,  # уже скорректирован на сплит, если применимо
         "currency": currency,
         "actual_gap": gap,
         "div_yield": div_yield,
@@ -125,6 +134,7 @@ def build_dividend_events() -> pd.DataFrame:
         for _, row in divs.iterrows():
             event = calculate_gap_event(
                 df_price=df_price,
+                ticker=ticker,
                 cutoff=row["cutoff_date"],
                 dividend_per_share=row["dividend_per_share"],
                 currency=row.get("currency", "RUB"),
